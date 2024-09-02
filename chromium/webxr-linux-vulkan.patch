@@ -1,8 +1,8 @@
 diff --git a/DEPS b/DEPS
-index c24c48a3d2..a0f3bee2ae 100644
+index c98f944ee613..5f2098fd6329 100644
 --- a/DEPS
 +++ b/DEPS
-@@ -173,7 +173,7 @@ vars = {
+@@ -168,7 +168,7 @@ vars = {
    # By default checkout the OpenXR loader library only on Windows and Android.
    # The OpenXR backend for VR in Chromium is currently only supported for these
    # platforms, but support for other platforms may be added in the future.
@@ -11,8 +11,159 @@ index c24c48a3d2..a0f3bee2ae 100644
  
    'checkout_instrumented_libraries': 'checkout_linux and checkout_configuration != "small"',
  
+diff --git a/chrome/browser/vr/BUILD.gn b/chrome/browser/vr/BUILD.gn
+index 1f60f1ea3438..05bf73f2d8f6 100644
+--- a/chrome/browser/vr/BUILD.gn
++++ b/chrome/browser/vr/BUILD.gn
+@@ -210,6 +210,17 @@ component("vr_common") {
+       "//ui/gl/init",
+     ]
+   }
++
++  if (is_linux) {
++    sources += [
++      "graphics_delegate_linux.cc",
++      "graphics_delegate_linux.h",
++    ]
++
++    deps += [
++      "//services/viz/public/cpp/gpu",
++    ]
++  }
+ }
+ 
+ # vr_base contains common dependencies of vr_common and vr_ui. It exists because
+diff --git a/chrome/browser/vr/graphics_delegate.cc b/chrome/browser/vr/graphics_delegate.cc
+index b1b4bc0f6cd8..8794e124b922 100644
+--- a/chrome/browser/vr/graphics_delegate.cc
++++ b/chrome/browser/vr/graphics_delegate.cc
+@@ -22,6 +22,8 @@
+ #include "chrome/browser/vr/graphics_delegate_win.h"
+ #elif BUILDFLAG(IS_ANDROID)
+ #include "chrome/browser/vr/graphics_delegate_android.h"
++#elif BUILDFLAG(IS_LINUX)
++#include "chrome/browser/vr/graphics_delegate_linux.h"
+ #endif
+ 
+ namespace vr {
+@@ -66,6 +68,8 @@ std::unique_ptr<GraphicsDelegate> GraphicsDelegate::Create() {
+   return std::make_unique<GraphicsDelegateWin>();
+ #elif BUILDFLAG(IS_ANDROID)
+   return std::make_unique<GraphicsDelegateAndroid>();
++#elif BUILDFLAG(IS_LINUX)
++  return std::make_unique<GraphicsDelegateLinux>();
+ #else
+   NOTIMPLEMENTED();
+   return nullptr;
+diff --git a/chrome/browser/vr/graphics_delegate_linux.cc b/chrome/browser/vr/graphics_delegate_linux.cc
+new file mode 100644
+index 000000000000..91b03c347dba
+--- /dev/null
++++ b/chrome/browser/vr/graphics_delegate_linux.cc
+@@ -0,0 +1,66 @@
++#include "chrome/browser/vr/graphics_delegate_linux.h"
++
++#include "content/public/browser/gpu_utils.h"
++#include "content/public/common/gpu_stream_constants.h"
++#include "gpu/command_buffer/client/gles2_lib.h"
++
++namespace vr {
++
++GraphicsDelegateLinux::GraphicsDelegateLinux() = default;
++GraphicsDelegateLinux::~GraphicsDelegateLinux() = default;
++
++void GraphicsDelegateLinux::Initialize(base::OnceClosure on_initialized) {
++  gpu::GpuChannelEstablishFactory* factory =
++      content::GetGpuChannelEstablishFactory();
++  gpu_channel_host_ = factory->EstablishGpuChannelSync();
++  gpu::ContextCreationAttribs attributes;
++  attributes.bind_generates_resource = false;
++  context_provider_ = base::MakeRefCounted<viz::ContextProviderCommandBuffer>(
++      gpu_channel_host_, content::kGpuStreamIdDefault,
++      content::kGpuStreamPriorityUI, gpu::kNullSurfaceHandle,
++      GURL(std::string("chrome://gpu/VrUiLinux")), false /* automatic flushes */,
++      false /* support locking */, gpu::SharedMemoryLimits::ForMailboxContext(),
++      attributes, viz::command_buffer_metrics::ContextType::XR_COMPOSITING);
++  if (context_provider_->BindToCurrentSequence() ==
++      gpu::ContextResult::kSuccess) {
++    gl_ = context_provider_->ContextGL();
++  }
++  std::move(on_initialized).Run(); // TODO: stub
++}
++
++bool GraphicsDelegateLinux::PreRender() {
++    return false; // TODO: stub
++}
++
++void GraphicsDelegateLinux::PostRender() {
++  ClearContext(); // TODO: stub
++}
++
++gfx::GpuMemoryBufferHandle GraphicsDelegateLinux::GetTexture() {
++  return gfx::GpuMemoryBufferHandle(); // TODO: stub
++}
++
++gpu::SyncToken GraphicsDelegateLinux::GetSyncToken() {
++  return {}; // TODO: stub
++}
++
++void GraphicsDelegateLinux::ResetMemoryBuffer() {} // TODO: stub
++
++bool GraphicsDelegateLinux::BindContext() {
++  if (!gl_)
++    return false;
++
++  ::gles2::SetGLContext(gl_);
++  return true;
++}
++
++void GraphicsDelegateLinux::ClearContext() {
++  ::gles2::SetGLContext(nullptr);
++}
++
++void GraphicsDelegateLinux::ClearBufferToBlack() {
++  gl_->ClearColor(0, 0, 0, 0);
++  gl_->Clear(GL_COLOR_BUFFER_BIT);
++}
++
++}  // namespace vr
+diff --git a/chrome/browser/vr/graphics_delegate_linux.h b/chrome/browser/vr/graphics_delegate_linux.h
+new file mode 100644
+index 000000000000..f5df91dfebe0
+--- /dev/null
++++ b/chrome/browser/vr/graphics_delegate_linux.h
+@@ -0,0 +1,29 @@
++#pragma once
++#include "chrome/browser/vr/graphics_delegate.h"
++#include "gpu/command_buffer/client/gles2_interface.h"
++#include "gpu/ipc/client/gpu_channel_host.h"
++#include "services/viz/public/cpp/gpu/context_provider_command_buffer.h"
++
++namespace vr {
++
++class GraphicsDelegateLinux : public GraphicsDelegate {
++ public:
++  GraphicsDelegateLinux();
++  ~GraphicsDelegateLinux() override;
++  void Initialize(base::OnceClosure on_initialized) override;
++  bool PreRender() override;
++  void PostRender() override;
++  gfx::GpuMemoryBufferHandle GetTexture() override;
++  gpu::SyncToken GetSyncToken() override;
++  void ResetMemoryBuffer() override;
++  bool BindContext() override;
++  void ClearContext() override;
++ private:
++  void ClearBufferToBlack() override;
++
++  scoped_refptr<gpu::GpuChannelHost> gpu_channel_host_;
++  scoped_refptr<viz::ContextProviderCommandBuffer> context_provider_;
++  raw_ptr<gpu::gles2::GLES2Interface> gl_ = nullptr;
++};
++
++}  // namespace vr
 diff --git a/content/services/isolated_xr_device/xr_runtime_provider.cc b/content/services/isolated_xr_device/xr_runtime_provider.cc
-index 27c89a1464..1c6f6e4d1b 100644
+index e58956c59e41..5b6e810bc5d8 100644
 --- a/content/services/isolated_xr_device/xr_runtime_provider.cc
 +++ b/content/services/isolated_xr_device/xr_runtime_provider.cc
 @@ -13,10 +13,14 @@
@@ -68,13 +219,14 @@ index 27c89a1464..1c6f6e4d1b 100644
    return should_check_openxr_ && openxr_platform_helper_->IsHardwareAvailable();
  }
 diff --git a/content/services/isolated_xr_device/xr_runtime_provider.h b/content/services/isolated_xr_device/xr_runtime_provider.h
-index 0e7880f97e..323b21c7ec 100644
+index b634ec19d8c8..323b21c7ec38 100644
 --- a/content/services/isolated_xr_device/xr_runtime_provider.h
 +++ b/content/services/isolated_xr_device/xr_runtime_provider.h
-@@ -21,6 +21,13 @@
+@@ -21,7 +21,13 @@
  #include "services/viz/public/cpp/gpu/gpu.h"
  #endif
  
+-#if BUILDFLAG(ENABLE_OPENXR) && BUILDFLAG(IS_WIN)
 +#if BUILDFLAG(ENABLE_OPENXR) && BUILDFLAG(IS_LINUX)
 +#include "components/viz/common/gpu/context_provider.h"
 +#include "device/vr/openxr/context_provider_callbacks.h"
@@ -85,7 +237,15 @@ index 0e7880f97e..323b21c7ec 100644
  namespace device {
  class OpenXrDevice;
  }  // namespace device
-@@ -48,7 +55,7 @@ class IsolatedXRRuntimeProvider final
+@@ -29,7 +35,6 @@ class OpenXrDevice;
+ namespace viz {
+ class Gpu;
+ }  // namespace viz
+-#endif
+ 
+ class IsolatedXRRuntimeProvider final
+     : public device::mojom::IsolatedXRRuntimeProvider {
+@@ -50,7 +55,7 @@ class IsolatedXRRuntimeProvider final
    void PollForDeviceChanges();
    void SetupPollingForDeviceChanges();
  
@@ -94,7 +254,7 @@ index 0e7880f97e..323b21c7ec 100644
    bool IsOpenXrHardwareAvailable();
    void SetOpenXrRuntimeStatus(RuntimeStatus status);
    void CreateContextProviderAsync(
-@@ -57,7 +64,11 @@ class IsolatedXRRuntimeProvider final
+@@ -59,7 +64,11 @@ class IsolatedXRRuntimeProvider final
    bool should_check_openxr_ = false;
  
    // Must outlive OpenXrDevice
@@ -107,10 +267,10 @@ index 0e7880f97e..323b21c7ec 100644
    std::unique_ptr<device::OpenXrDevice> openxr_device_;
  
 diff --git a/device/vr/BUILD.gn b/device/vr/BUILD.gn
-index 7893093074..98494902b6 100644
+index 15df8abbb8d6..ea87fbe4cb3e 100644
 --- a/device/vr/BUILD.gn
 +++ b/device/vr/BUILD.gn
-@@ -244,6 +244,19 @@ if (enable_vr) {
+@@ -246,6 +246,19 @@ if (enable_vr) {
          deps += [ ":directx_helpers" ]
        }
  
@@ -129,12 +289,17 @@ index 7893093074..98494902b6 100644
 +
        if (is_android) {
          sources += [
-           "openxr/android/openxr_graphics_binding_open_gles.cc",
+           "openxr/android/openxr_anchor_manager_android.cc",
 diff --git a/device/vr/buildflags/buildflags.gni b/device/vr/buildflags/buildflags.gni
-index 6f69f9ee24..78ad912411 100644
+index 1c0b7ac1023d..1a65da15eb48 100644
 --- a/device/vr/buildflags/buildflags.gni
 +++ b/device/vr/buildflags/buildflags.gni
-@@ -26,7 +26,7 @@ declare_args() {
+@@ -20,11 +20,11 @@ declare_args() {
+ 
+   enable_arcore = _is_xr_supported_android
+ 
+-  use_command_buffer = is_win
++  use_command_buffer = is_win || is_linux
  
    # To build with OpenXR support, the OpenXR Loader needs to be pulled to
    # third_party/openxr.
@@ -145,14 +310,15 @@ index 6f69f9ee24..78ad912411 100644
  declare_args() {
 diff --git a/device/vr/openxr/linux/openxr_graphics_binding_vulkan.cc b/device/vr/openxr/linux/openxr_graphics_binding_vulkan.cc
 new file mode 100644
-index 0000000000..0285bbac23
+index 000000000000..3d9e9e5507d2
 --- /dev/null
 +++ b/device/vr/openxr/linux/openxr_graphics_binding_vulkan.cc
-@@ -0,0 +1,343 @@
+@@ -0,0 +1,384 @@
 +#include "device/vr/openxr/linux/openxr_graphics_binding_vulkan.h"
 +#include "base/containers/contains.h"
 +#include "base/native_library.h"
 +#include "device/vr/openxr/openxr_util.h"
++#include "components/viz/common/gpu/context_provider.h"
 +#include "gpu/command_buffer/common/shared_image_usage.h"
 +#include "gpu/ipc/common/gpu_memory_buffer_support.h"
 +#include "gpu/vulkan/vulkan_function_pointers.h"
@@ -172,9 +338,6 @@ index 0000000000..0285bbac23
 +OpenXrGraphicsBindingVulkan::~OpenXrGraphicsBindingVulkan() {
 +  if (initialized_)
 +    vkDeviceWaitIdle(binding_.device);
-+  if (gpuTransferImage_)
-+    gpuTransferImage_->Destroy();
-+  gpuTransferImage_.reset();
 +  if (commandBuffer_)
 +    commandBuffer_->Destroy();
 +  commandBuffer_.reset();
@@ -191,7 +354,7 @@ index 0000000000..0285bbac23
 +struct StaticLibrary {
 +  base::NativeLibrary handle;
 +  StaticLibrary(base::NativeLibrary library) : handle(library) {}
-+  ~StaticLibrary() {base::UnloadNativeLibrary(handle);}
++  // ~StaticLibrary() {base::UnloadNativeLibrary(handle);} // no exit-time destructor
 +  operator base::NativeLibrary() const {return handle;}
 +};
 +
@@ -297,9 +460,14 @@ index 0000000000..0285bbac23
 +  RETURN_IF(result < VK_SUCCESS, XR_ERROR_RUNTIME_FAILURE, "xrCreateVulkanDeviceKHR() failed");
 +  if (!vulkan_function_pointers->BindDeviceFunctionPointers(binding_.device, gpu::kVulkanRequiredApiVersion, extension_set))
 +    return XR_ERROR_RUNTIME_FAILURE;
-+  vkCmdCopyImage_ = reinterpret_cast<PFN_vkCmdCopyImage>(vkGetDeviceProcAddr(binding_.device, "vkCmdCopyImage"));
-+  if (!vkCmdCopyImage_) {
++  pfn_vkCmdCopyImage_ = reinterpret_cast<PFN_vkCmdCopyImage>(vkGetDeviceProcAddr(binding_.device, "vkCmdCopyImage"));
++  if (!pfn_vkCmdCopyImage_) {
 +    DLOG(WARNING) << "Failed to bind vulkan entrypoint: vkCmdCopyImage";
++    return XR_ERROR_RUNTIME_FAILURE;
++  }
++  pfn_vkCmdClearColorImage_ = reinterpret_cast<PFN_vkCmdClearColorImage>(vkGetDeviceProcAddr(binding_.device, "vkCmdClearColorImage"));
++  if (!pfn_vkCmdClearColorImage_) {
++    DLOG(WARNING) << "Failed to bind vulkan entrypoint: vkCmdClearColorImage";
 +    return XR_ERROR_RUNTIME_FAILURE;
 +  }
 +
@@ -319,15 +487,8 @@ index 0000000000..0285bbac23
 +}
 +
 +bool OpenXrGraphicsBindingVulkan::Initialize(XrInstance instance, XrSystemId system) {
-+  if (initialized_) {
-+    return true;
-+  }
-+
-+  if (XR_FAILED(SetupBinding(instance, system)))
-+    return false;
-+  initialized_ = true;
-+  OnSwapchainImageSizeChanged();
-+  return true;
++  initialized_ = initialized_ || !XR_FAILED(SetupBinding(instance, system));
++  return initialized_;
 +}
 +
 +const void* OpenXrGraphicsBindingVulkan::GetSessionCreateInfo() const {
@@ -342,16 +503,16 @@ index 0000000000..0285bbac23
 +  RETURN_IF_XR_FAILED(xrEnumerateSwapchainFormats(session, (uint32_t)swapchain_formats.size(), &format_length, swapchain_formats.data()));
 +  DCHECK(!swapchain_formats.empty());
 +
-+  if (base::Contains(swapchain_formats, VK_FORMAT_R8G8B8A8_SRGB))
-+    return VK_FORMAT_R8G8B8A8_SRGB;
++  if (base::Contains(swapchain_formats, VK_FORMAT_B8G8R8A8_SRGB))
++    return VK_FORMAT_B8G8R8A8_SRGB;
 +
-+  if (!base::Contains(swapchain_formats, VK_FORMAT_R8G8B8A8_UNORM)) {
++  if (!base::Contains(swapchain_formats, VK_FORMAT_B8G8R8A8_UNORM)) {
 +    LOG(ERROR) << "No matching supported swapchain formats with OpenXr Runtime:";
 +    for(int64_t format : swapchain_formats)
 +      LOG(ERROR) << "    " << format;
 +  }
 +
-+  return VK_FORMAT_R8G8B8A8_UNORM;
++  return VK_FORMAT_B8G8R8A8_UNORM;
 +}
 +
 +XrResult OpenXrGraphicsBindingVulkan::EnumerateSwapchainImages(const XrSwapchain& color_swapchain) {
@@ -372,7 +533,14 @@ index 0000000000..0285bbac23
 +  return XR_SUCCESS;
 +}
 +
-+void OpenXrGraphicsBindingVulkan::ClearSwapChainImages() {
++void OpenXrGraphicsBindingVulkan::ClearSwapchainImages() {
++  vkDeviceWaitIdle(binding_.device);
++  for (auto& swap_chain_info : color_swapchain_images_) {
++    if (swap_chain_info.local_vkimage == nullptr)
++      continue;
++    swap_chain_info.local_vkimage->Destroy();
++    swap_chain_info.local_vkimage.reset();
++  }
 +  color_swapchain_images_.clear();
 +}
 +
@@ -381,33 +549,24 @@ index 0000000000..0285bbac23
 +}
 +
 +bool OpenXrGraphicsBindingVulkan::CanUseSharedImages() const {
-+  return false;
++  return true;
 +}
 +
-+void OpenXrGraphicsBindingVulkan::CreateSharedImages(gpu::SharedImageInterface* sii) {}
-+
-+const SwapChainInfo& OpenXrGraphicsBindingVulkan::GetActiveSwapchainImage() {
-+  CHECK(has_active_swapchain_image());
-+  CHECK(active_swapchain_index() < color_swapchain_images_.size());
-+  return color_swapchain_images_[active_swapchain_index()];
-+}
-+
-+bool OpenXrGraphicsBindingVulkan::WaitOnFence(gfx::GpuFence& gpu_fence) {
-+  return false;
-+}
-+
-+void OpenXrGraphicsBindingVulkan::OnSwapchainImageSizeChanged() {
-+  gpuTransferMailbox_ = {};
-+  gpuTransferBuffer_ = nullptr;
-+  if (!initialized_)
++void OpenXrGraphicsBindingVulkan::ResizeSharedBuffer(SwapChainInfo& swap_chain_info, gpu::SharedImageInterface* sii) {
++  CHECK(sii);
++  auto transfer_size = GetTransferSize();
++  if (swap_chain_info.shared_buffer_size == transfer_size)
 +    return;
 +
-+  const gfx::Size size = GetSwapchainImageSize(); // TODO: return early if size hasn't changed
-+
-+  vkDeviceWaitIdle(binding_.device);
-+  if (gpuTransferImage_)
-+    gpuTransferImage_->Destroy();
-+  gpuTransferImage_.reset();
++  if (swap_chain_info.shared_image.get() != nullptr) {
++    DVLOG(2) << ": DestroySharedImage, mailbox=" << swap_chain_info.shared_image->mailbox().ToDebugString();
++    sii->DestroySharedImage(swap_chain_info.sync_token, std::move(swap_chain_info.shared_image));
++  }
++  if (swap_chain_info.local_vkimage != nullptr) {
++    vkDeviceWaitIdle(binding_.device);
++    swap_chain_info.local_vkimage->Destroy();
++    swap_chain_info.local_vkimage.reset();
++  }
 +
 +  const VkExternalMemoryImageCreateInfo extra_image_create_info = {
 +    .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
@@ -417,14 +576,14 @@ index 0000000000..0285bbac23
 +    .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
 +    .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
 +  };
-+  gpuTransferImage_ = gpu::VulkanImage::Create(copyQueue_.get(), size, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0,
++  std::unique_ptr<gpu::VulkanImage> backingImage = gpu::VulkanImage::Create(copyQueue_.get(), transfer_size, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0,
 +    haveDrmFormatModifiers_ ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT : VK_IMAGE_TILING_OPTIMAL, &extra_image_create_info, &extra_memory_allocation_info);
-+  if (!gpuTransferImage_)
-+    return;
 +
-+  base::ScopedFD fd = gpuTransferImage_->GetMemoryFd(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
++  base::ScopedFD fd = backingImage->GetMemoryFd(VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
 +  if (!fd.is_valid()) {
 +    LOG(ERROR) << "vkGetMemoryFdKHR() failed";
++    backingImage->Destroy();
++    backingImage.reset(); // TODO: std::move
 +    return;
 +  }
 +
@@ -433,71 +592,118 @@ index 0000000000..0285bbac23
 +    .drmFormatModifier = gfx::NativePixmapHandle::kNoModifier,
 +  };
 +  if (haveDrmFormatModifiers_) {
-+    const VkResult result = vkGetImageDrmFormatModifierPropertiesEXT(binding_.device, gpuTransferImage_->image(), &modifier_props);
++    const VkResult result = vkGetImageDrmFormatModifierPropertiesEXT(binding_.device, backingImage->image(), &modifier_props);
 +    if (result != VK_SUCCESS) {
 +      LOG(ERROR) << "vkGetImageDrmFormatModifierPropertiesEXT failed result:" << result;
++      backingImage->Destroy();
++      backingImage.reset();
 +      return;
 +    }
 +  }
-+  
-+  gfx::GpuMemoryBufferHandle handle;
++
++  gfx::GpuMemoryBufferHandle handle = {};
 +  handle.id = gfx::GpuMemoryBufferId(next_memory_buffer_id++);
 +  handle.type = gfx::GpuMemoryBufferType::NATIVE_PIXMAP;
-+  handle.native_pixmap_handle.planes.emplace_back(0, 0, gpuTransferImage_->device_size(), std::move(fd));
++  handle.native_pixmap_handle.planes.emplace_back(0, 0, backingImage->device_size(), std::move(fd));
 +  handle.native_pixmap_handle.modifier = modifier_props.drmFormatModifier;
-+  gpu::GpuMemoryBufferSupport support;
-+  gpuTransferBuffer_ = support.CreateGpuMemoryBufferImplFromHandle(std::move(handle), size, gfx::BufferFormat::BGRA_8888, gfx::BufferUsage::SCANOUT, base::NullCallback());
++
++  swap_chain_info.shared_image = sii->CreateSharedImage({
++    viz::SinglePlaneFormat::kBGRA_8888,
++    transfer_size,
++    gfx::ColorSpace(),
++    gpu::SHARED_IMAGE_USAGE_GLES2_READ | gpu::SHARED_IMAGE_USAGE_GLES2_WRITE,
++    "OpenXrGraphicsBindingVulkan",
++  }, std::move(handle));
++  CHECK(swap_chain_info.shared_image);
++  swap_chain_info.sync_token = sii->GenVerifiedSyncToken();
++  swap_chain_info.local_vkimage = std::move(backingImage);
++  backingImage.reset();
 +}
 +
-+void OpenXrGraphicsBindingVulkan::BlitFrom(const gpu::MailboxHolder& holder, gpu::gles2::GLES2Interface *gl, gpu::SharedImageInterface *sii) {
++void OpenXrGraphicsBindingVulkan::CreateSharedImages(gpu::SharedImageInterface* sii) {
++  CHECK(sii);
++  using_shared_images_ = true;
++
++  for (auto& swap_chain_info : color_swapchain_images_)
++    ResizeSharedBuffer(swap_chain_info, sii);
++}
++
++const SwapChainInfo& OpenXrGraphicsBindingVulkan::GetActiveSwapchainImage() {
++  CHECK(has_active_swapchain_image());
++  CHECK(active_swapchain_index() < color_swapchain_images_.size());
++  return color_swapchain_images_[active_swapchain_index()];
++}
++
++void OpenXrGraphicsBindingVulkan::CleanupWithoutSubmit() {}
++
++bool OpenXrGraphicsBindingVulkan::WaitOnFence(gfx::GpuFence& gpu_fence) {
++  return false;
++}
++
++bool OpenXrGraphicsBindingVulkan::ShouldFlipSubmittedImage() {
++  return true;
++}
++
++void OpenXrGraphicsBindingVulkan::OnSwapchainImageActivated(gpu::SharedImageInterface* sii) {
++  CHECK(has_active_swapchain_image());
++  CHECK(active_swapchain_index() < color_swapchain_images_.size());
++  CHECK(using_shared_images_);
++  ResizeSharedBuffer(color_swapchain_images_[active_swapchain_index()], sii);
++}
++
++void OpenXrGraphicsBindingVulkan::SetOverlayAndWebXrVisibility(bool overlay_visible, bool webxr_visible) {
++  if (!overlay_visible_ && overlay_visible)
++    LOG(WARNING) << "Overlay compositing not implemented yet; overlay will not be visible";
++  webxr_visible_ = webxr_visible;
++  overlay_visible_ = overlay_visible;
++}
++
++bool OpenXrGraphicsBindingVulkan::SetOverlayTexture(gfx::GpuMemoryBufferHandle texture, const gpu::SyncToken& sync_token, const gfx::RectF& left, const gfx::RectF& right) {
++    return false; // TODO: overlay support
++}
++
++bool OpenXrGraphicsBindingVulkan::Render(const scoped_refptr<viz::ContextProvider>& context_provider) {
 +  const gfx::Size imageSize = GetTransferSize();
-+  if (imageSize != GetSwapchainImageSize() || !gpuTransferBuffer_)
-+    return;
-+
-+  commandBuffer_->Wait(UINT64_MAX);
-+  if (gpuTransferMailbox_.mailbox.IsZero()) {
-+    gpuTransferMailbox_.mailbox = sii->CreateSharedImage(viz::SinglePlaneFormat::kBGRA_8888, gpuTransferBuffer_->GetSize(), gfx::ColorSpace(), kBottomLeft_GrSurfaceOrigin, kPremul_SkAlphaType, gpu::SHARED_IMAGE_USAGE_GLES2, "OpenXrGraphicsBindingVulkan", gpuTransferBuffer_->CloneHandle());
-+    gpuTransferMailbox_.sync_token = sii->GenVerifiedSyncToken();
-+    gpuTransferMailbox_.texture_target = GL_TEXTURE_2D;
-+    gl->WaitSyncTokenCHROMIUM(sii->GenUnverifiedSyncToken().GetConstData());
-+  }
-+
-+  gpu::Mailbox::Name mailboxes[2];
-+  memcpy(mailboxes[0], holder.mailbox.name, sizeof(gpu::Mailbox::Name));
-+  memcpy(mailboxes[1], gpuTransferMailbox_.mailbox.name, sizeof(gpu::Mailbox::Name));
-+  gl->WaitSyncTokenCHROMIUM(holder.sync_token.GetConstData());
-+  gl->CopySharedImageINTERNAL(0, 0, 0, 0, imageSize.width(), imageSize.height(), true, *mailboxes);
-+  gl->Finish(); // CHROMIUM_gpu_fence isn't available on Linux and I'm not sure how else to synchronize this
-+
 +  SwapChainInfo &image = color_swapchain_images_[active_swapchain_index()];
++  commandBuffer_->Wait(UINT64_MAX);
++  if (imageSize != GetSwapchainImageSize() || image.local_vkimage == nullptr)
++    return false;
 +  {
 +    gpu::ScopedSingleUseCommandBufferRecorder recorder(*commandBuffer_); // vkBeginCommandBuffer
-+    commandBuffer_->TransitionImageLayout(gpuTransferImage_->image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-+    commandBuffer_->TransitionImageLayout(image.openxr_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-+    vkCmdCopyImage_(recorder.handle(), gpuTransferImage_->image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image.openxr_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, (const VkImageCopy[1]){{
-+      .srcSubresource = {
++    if (webxr_visible_) {
++      commandBuffer_->TransitionImageLayout(image.local_vkimage->image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++      commandBuffer_->TransitionImageLayout(image.openxr_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++      pfn_vkCmdCopyImage_(recorder.handle(), image.local_vkimage->image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image.openxr_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, (const VkImageCopy[1]){{
++        .srcSubresource = {
++          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++          .layerCount = 1,
++        },
++        .dstSubresource = {
++          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++          .layerCount = 1,
++        },
++        .extent = {(uint32_t)imageSize.width(), (uint32_t)imageSize.height(), 1},
++      }});
++      commandBuffer_->TransitionImageLayout(image.local_vkimage->image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++      commandBuffer_->TransitionImageLayout(image.openxr_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
++    } else {
++      pfn_vkCmdClearColorImage_(recorder.handle(), image.openxr_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (const VkClearColorValue[1]){}, 1, (const VkImageSubresourceRange[1]){{
 +        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 +        .layerCount = 1,
-+      },
-+      .dstSubresource = {
-+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-+        .layerCount = 1,
-+      },
-+      .extent = {(uint32_t)imageSize.width(), (uint32_t)imageSize.height(), 1},
-+    }});
-+    commandBuffer_->TransitionImageLayout(gpuTransferImage_->image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-+    commandBuffer_->TransitionImageLayout(image.openxr_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
++      }});
++    }
 +  } // ~CommandBufferRecorderBase() - vkEndCommandBuffer
 +  commandBuffer_->Submit(0, nullptr, 0, nullptr);
++  return true; // TODO: move blit logic here
 +}
 +
 +} // namespace device
 diff --git a/device/vr/openxr/linux/openxr_graphics_binding_vulkan.h b/device/vr/openxr/linux/openxr_graphics_binding_vulkan.h
 new file mode 100644
-index 0000000000..a17ae30605
+index 000000000000..02c83c39e19b
 --- /dev/null
 +++ b/device/vr/openxr/linux/openxr_graphics_binding_vulkan.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,58 @@
 +#pragma once
 +#include <vector>
 +
@@ -509,7 +715,6 @@ index 0000000000..a17ae30605
 +#include "gpu/vulkan/vulkan_command_buffer.h"
 +#include "gpu/vulkan/vulkan_command_pool.h"
 +#include "gpu/vulkan/vulkan_device_queue.h"
-+#include "gpu/vulkan/vulkan_image.h"
 +#include "ui/gfx/gpu_memory_buffer.h"
 +
 +namespace device {
@@ -524,19 +729,27 @@ index 0000000000..a17ae30605
 +  int64_t GetSwapchainFormat(XrSession session) const override;
 +  XrResult EnumerateSwapchainImages(
 +      const XrSwapchain& color_swapchain) override;
-+  void ClearSwapChainImages() override;
++  void ClearSwapchainImages() override;
 +  base::span<SwapChainInfo> GetSwapChainImages() override;
 +  bool CanUseSharedImages() const override;
 +  void CreateSharedImages(gpu::SharedImageInterface* sii) override;
 +  const SwapChainInfo& GetActiveSwapchainImage() override;
++  void CleanupWithoutSubmit() override;
 +  bool WaitOnFence(gfx::GpuFence& gpu_fence) override;
-+  void BlitFrom(const gpu::MailboxHolder& holder, gpu::gles2::GLES2Interface *gl, gpu::SharedImageInterface *sii);
++  bool ShouldFlipSubmittedImage() override;
++  void SetOverlayAndWebXrVisibility(bool overlay_visible, bool webxr_visible) override;
++  bool SetOverlayTexture(gfx::GpuMemoryBufferHandle texture, const gpu::SyncToken& sync_token, const gfx::RectF& left, const gfx::RectF& right) override;
++  bool Render(const scoped_refptr<viz::ContextProvider>& context_provider) override;
 +
 +private:
++  void ResizeSharedBuffer(SwapChainInfo& swap_chain_info, gpu::SharedImageInterface* sii);
 +  XrResult SetupBinding(XrInstance instance, XrSystemId system);
-+  void OnSwapchainImageSizeChanged() override;
++  void OnSwapchainImageActivated(gpu::SharedImageInterface* sii) override;
 +  bool initialized_ = false;
 +  bool haveDrmFormatModifiers_ = false;
++  bool using_shared_images_ = false;
++  bool webxr_visible_ = true;
++  bool overlay_visible_ = false;
 +  XrGraphicsBindingVulkan2KHR binding_{XR_TYPE_GRAPHICS_BINDING_VULKAN2_KHR, nullptr};
 +  std::vector<SwapChainInfo> color_swapchain_images_;
 +
@@ -544,17 +757,14 @@ index 0000000000..a17ae30605
 +  std::unique_ptr<gpu::VulkanCommandPool> commandPool_ = nullptr;
 +  std::unique_ptr<gpu::VulkanCommandBuffer> commandBuffer_ = nullptr;
 +
-+  std::unique_ptr<gpu::VulkanImage> gpuTransferImage_ = nullptr;
-+  std::unique_ptr<gfx::GpuMemoryBuffer> gpuTransferBuffer_ = nullptr;
-+  gpu::MailboxHolder gpuTransferMailbox_;
-+
-+  PFN_vkCmdCopyImage vkCmdCopyImage_ = nullptr;
++  PFN_vkCmdCopyImage pfn_vkCmdCopyImage_ = nullptr;
++  PFN_vkCmdClearColorImage pfn_vkCmdClearColorImage_ = nullptr;
 +};
 +
 +}  // namespace device
 diff --git a/device/vr/openxr/linux/openxr_platform_helper_linux.cc b/device/vr/openxr/linux/openxr_platform_helper_linux.cc
 new file mode 100644
-index 0000000000..6edd66879d
+index 000000000000..fb3e287dc92b
 --- /dev/null
 +++ b/device/vr/openxr/linux/openxr_platform_helper_linux.cc
 @@ -0,0 +1,63 @@
@@ -575,7 +785,7 @@ index 0000000000..6edd66879d
 +  return std::make_unique<OpenXrGraphicsBindingVulkan>();
 +}
 +
-+void OpenXrPlatformHelperLinux::GetPlatformCreateInfo(const device::OpenXrCreateInfo& create_info, PlatformCreateInfoReadyCallback callback) {
++void OpenXrPlatformHelperLinux::GetPlatformCreateInfo(const device::OpenXrCreateInfo& create_info, PlatformCreateInfoReadyCallback callback, PlatormInitiatedShutdownCallback) {
 +  std::move(callback).Run(nullptr);
 +}
 +
@@ -623,7 +833,7 @@ index 0000000000..6edd66879d
 +}  // namespace device
 diff --git a/device/vr/openxr/linux/openxr_platform_helper_linux.h b/device/vr/openxr/linux/openxr_platform_helper_linux.h
 new file mode 100644
-index 0000000000..a922dbf431
+index 000000000000..17e060c8968f
 --- /dev/null
 +++ b/device/vr/openxr/linux/openxr_platform_helper_linux.h
 @@ -0,0 +1,27 @@
@@ -639,7 +849,7 @@ index 0000000000..a922dbf431
 +  ~OpenXrPlatformHelperLinux() override;
 +
 +  std::unique_ptr<OpenXrGraphicsBinding> GetGraphicsBinding() override;
-+  void GetPlatformCreateInfo(const device::OpenXrCreateInfo& create_info, PlatformCreateInfoReadyCallback) override;
++  void GetPlatformCreateInfo(const device::OpenXrCreateInfo& create_info, PlatformCreateInfoReadyCallback, PlatormInitiatedShutdownCallback) override;
 +  device::mojom::XRDeviceData GetXRDeviceData() override;
 +  bool Initialize() override;
 +
@@ -654,11 +864,25 @@ index 0000000000..a922dbf431
 +};
 +
 +}
+diff --git a/device/vr/openxr/openxr_extension_handler_factories.cc b/device/vr/openxr/openxr_extension_handler_factories.cc
+index f00bbf50adf2..c8d4c448cd09 100644
+--- a/device/vr/openxr/openxr_extension_handler_factories.cc
++++ b/device/vr/openxr/openxr_extension_handler_factories.cc
+@@ -57,7 +57,9 @@ GetExtensionHandlerFactories() {
+ 
+           new OpenXrStageBoundsProviderBasicFactory(),
+ 
++#if !BUILDFLAG(IS_LINUX)
+           new OpenXrUnboundedSpaceProviderMsftFactory(),
++#endif
+ 
+           new OpenXrSceneUnderstandingManagerMsftFactory(),
+ 
 diff --git a/device/vr/openxr/openxr_graphics_binding.cc b/device/vr/openxr/openxr_graphics_binding.cc
-index df54dce45a..f2c996aeba 100644
+index 522d3537439a..92fda5214b54 100644
 --- a/device/vr/openxr/openxr_graphics_binding.cc
 +++ b/device/vr/openxr/openxr_graphics_binding.cc
-@@ -11,6 +11,8 @@ namespace device {
+@@ -16,6 +16,8 @@ namespace device {
  #if BUILDFLAG(IS_WIN)
  SwapChainInfo::SwapChainInfo(ID3D11Texture2D* d3d11_texture)
      : d3d11_texture(d3d11_texture) {}
@@ -668,21 +892,21 @@ index df54dce45a..f2c996aeba 100644
  SwapChainInfo::SwapChainInfo(uint32_t texture) : openxr_texture(texture) {}
  #endif
 diff --git a/device/vr/openxr/openxr_graphics_binding.h b/device/vr/openxr/openxr_graphics_binding.h
-index 39e8062136..a40265c8a8 100644
+index f2a45917e097..118d1d4176ef 100644
 --- a/device/vr/openxr/openxr_graphics_binding.h
 +++ b/device/vr/openxr/openxr_graphics_binding.h
-@@ -19,6 +19,10 @@
+@@ -24,6 +24,10 @@
  #include <wrl.h>
  #endif
  
 +#if BUILDFLAG(IS_LINUX)
-+#include <vulkan/vulkan_core.h>
++#include "gpu/vulkan/vulkan_image.h"
 +#endif
 +
  #if BUILDFLAG(IS_ANDROID)
- #include "gpu/ipc/common/gpu_memory_buffer_impl_android_hardware_buffer.h"
- #include "ui/gl/scoped_egl_image.h"
-@@ -39,6 +43,8 @@ struct SwapChainInfo {
+ #include "base/android/scoped_hardware_buffer_handle.h"
+ #include "device/vr/android/local_texture.h"
+@@ -50,6 +54,8 @@ struct SwapChainInfo {
   public:
  #if BUILDFLAG(IS_WIN)
    explicit SwapChainInfo(ID3D11Texture2D*);
@@ -691,17 +915,27 @@ index 39e8062136..a40265c8a8 100644
  #elif BUILDFLAG(IS_ANDROID)
    explicit SwapChainInfo(uint32_t texture);
  #endif
-@@ -56,6 +62,8 @@ struct SwapChainInfo {
+@@ -69,6 +75,10 @@ struct SwapChainInfo {
    // and D3D11Fence for each D3D11 texture in the vector.
    raw_ptr<ID3D11Texture2D> d3d11_texture = nullptr;
    Microsoft::WRL::ComPtr<ID3D11Fence> d3d11_fence;
 +#elif BUILDFLAG(IS_LINUX)
 +  VkImage openxr_image;
++  gfx::Size shared_buffer_size{0, 0};
++  std::unique_ptr<gpu::VulkanImage> local_vkimage;
  #elif BUILDFLAG(IS_ANDROID)
    // Ideally this would be a gluint, but there are conflicting headers for GL
    // depending on *how* you want to use it; so we can't use it at the moment.
+@@ -79,7 +89,6 @@ struct SwapChainInfo {
+   // The size of the texture used for the shared buffer; which may be different
+   // than the size of the actual swapchain image, as this size is influenced by
+   // any framebuffer scale factor that the page may request.
+-  // This property isn't android-specific but it is currently unused on Windows.
+   gfx::Size shared_buffer_size{0, 0};
+ 
+   // This owns a single reference to an AHardwareBuffer object.
 diff --git a/device/vr/openxr/openxr_platform.h b/device/vr/openxr/openxr_platform.h
-index a0158be7f9..65f0f32df7 100644
+index a0158be7f93c..65f0f32df748 100644
 --- a/device/vr/openxr/openxr_platform.h
 +++ b/device/vr/openxr/openxr_platform.h
 @@ -18,6 +18,8 @@
@@ -714,12 +948,12 @@ index a0158be7f9..65f0f32df7 100644
  #include <EGL/egl.h>
  #include <jni.h>
 diff --git a/device/vr/openxr/openxr_render_loop.cc b/device/vr/openxr/openxr_render_loop.cc
-index 31e956c757..358ef492df 100644
+index 79d9b07d3dd3..d119c768b20e 100644
 --- a/device/vr/openxr/openxr_render_loop.cc
 +++ b/device/vr/openxr/openxr_render_loop.cc
-@@ -26,6 +26,10 @@
- #include <d3d11_4.h>
- #endif
+@@ -50,6 +50,10 @@ device::mojom::XRRenderInfoPtr GetRenderInfo(
+ 
+ }  // namespace
  
 +#if BUILDFLAG(IS_LINUX)
 +#include "device/vr/openxr/linux/openxr_graphics_binding_vulkan.h"
@@ -727,46 +961,71 @@ index 31e956c757..358ef492df 100644
 +
  namespace device {
  
- OpenXrRenderLoop::OpenXrRenderLoop(
-@@ -125,7 +129,7 @@ void OpenXrRenderLoop::StartRuntime(
-   // texture helper rather than need it passed in.
- #if BUILDFLAG(IS_WIN)
-   graphics_binding_ = platform_helper_->GetGraphicsBinding(&texture_helper_);
--#elif BUILDFLAG(IS_ANDROID)
-+#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID)
-   graphics_binding_ = platform_helper_->GetGraphicsBinding();
- #endif
+ OpenXrRenderLoop::OutstandingFrame::OutstandingFrame() = default;
+@@ -375,8 +379,10 @@ void OpenXrRenderLoop::StartRuntimeFinish(
  
-@@ -312,9 +316,15 @@ void OpenXrRenderLoop::SubmitFrame(int16_t frame_index,
-                                    base::TimeDelta time_waited) {
+   mojo::PendingRemote<mojom::ImmersiveOverlay> overlay_remote;
+ 
++  #if !BUILDFLAG(IS_LINUX) // TODO: overlay support
+   overlay_receiver_.reset();
+   overlay_remote = overlay_receiver_.BindNewPipeAndPassRemote();
++  #endif
+ 
+   CHECK(request_session_callback_);
+   std::move(request_session_callback_)
+@@ -816,10 +822,16 @@ void OpenXrRenderLoop::SubmitFrameDrawnIntoTexture(
    DVLOG(3) << __func__ << " frame_index=" << frame_index;
-   CHECK(!IsUsingSharedImages());
+   gpu::gles2::GLES2Interface* gl = context_provider_->ContextGL();
+   gl->WaitSyncTokenCHROMIUM(sync_token.GetConstData());
 +  #if BUILDFLAG(IS_LINUX)
-+  static_cast<OpenXrGraphicsBindingVulkan*>(graphics_binding_.get())->BlitFrom(mailbox, context_provider_->ContextGL(), context_provider_->SharedImageInterface());
++  gl->Finish(); // CHROMIUM_gpu_fence isn't available on Linux
 +  MarkFrameSubmitted(frame_index);
 +  MaybeCompositeAndSubmit();
 +  #else
-   DCHECK(BUILDFLAG(IS_ANDROID));
-   // TODO(https://crbug.com/1454942): Support non-shared buffer mode.
-   SubmitFrameMissing(frame_index, mailbox.sync_token);
+   const GLuint id = gl->CreateGpuFenceCHROMIUM();
+   context_provider_->ContextSupport()->GetGpuFence(
+       id, base::BindOnce(&OpenXrRenderLoop::OnWebXrTokenSignaled,
+                          weak_ptr_factory_.GetWeakPtr(), frame_index, id));
 +  #endif
  }
  
- void OpenXrRenderLoop::SubmitFrameDrawnIntoTexture(
-@@ -349,7 +359,7 @@ void OpenXrRenderLoop::OnWebXrTokenSignaled(
+ void OpenXrRenderLoop::OnWebXrTokenSignaled(
+@@ -841,7 +853,7 @@ void OpenXrRenderLoop::OnWebXrTokenSignaled(
  #if BUILDFLAG(IS_WIN)
    SubmitFrameWithTextureHandle(frame_index, mojo::PlatformHandle(),
                                 gpu::SyncToken());
 -#elif BUILDFLAG(IS_ANDROID)
 +#elif BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
    MarkFrameSubmitted(frame_index);
-   graphics_binding_->Render();
    MaybeCompositeAndSubmit();
+ #endif
+diff --git a/device/vr/openxr/openxr_render_loop.h b/device/vr/openxr/openxr_render_loop.h
+index 5419f0349891..77a3c875ab51 100644
+--- a/device/vr/openxr/openxr_render_loop.h
++++ b/device/vr/openxr/openxr_render_loop.h
+@@ -38,7 +38,7 @@
+ #include "third_party/openxr/src/include/openxr/openxr.h"
+ #include "ui/gfx/geometry/rect_f.h"
+ 
+-#if BUILDFLAG(IS_WIN)
++#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX)
+ #include "base/threading/thread.h"
+ #endif
+ 
+@@ -65,7 +65,7 @@ class XRThread : public base::android::JavaHandlerThread {
+       : base::android::JavaHandlerThread(name) {}
+   ~XRThread() override = default;
+ };
+-#elif BUILDFLAG(IS_WIN)
++#elif BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX)
+ class XRThread : public base::Thread {
+  public:
+   explicit XRThread(const char* name) : base::Thread(name) {}
 diff --git a/device/vr/public/cpp/features.cc b/device/vr/public/cpp/features.cc
-index d1230c3f38..3fdcac0d92 100644
+index 7adbf50bdb3c..5f32dba2205d 100644
 --- a/device/vr/public/cpp/features.cc
 +++ b/device/vr/public/cpp/features.cc
-@@ -54,8 +54,8 @@ BASE_FEATURE(kEnableCardboard,
+@@ -63,8 +63,8 @@ BASE_FEATURE(kUseTargetTexture2DForSharedBuffers,
  // Controls WebXR support for the OpenXR Runtime.
  BASE_FEATURE(kOpenXR,
               "OpenXR",
@@ -777,32 +1036,19 @@ index d1230c3f38..3fdcac0d92 100644
  
  // Some WebXR features may have been enabled for ARCore, but are not yet ready
  // to be plumbed up from the OpenXR backend. This feature provides a mechanism
-diff --git a/device/vr/windows/compositor_base.cc b/device/vr/windows/compositor_base.cc
-index 198a8b0d28..3d1c4f85e6 100644
---- a/device/vr/windows/compositor_base.cc
-+++ b/device/vr/windows/compositor_base.cc
-@@ -623,7 +623,7 @@ void XRCompositorCommon::MaybeCompositeAndSubmit() {
-   } else {
-     texture_helper_.CleanupNoSubmit();
-   }
--#elif BUILDFLAG(IS_ANDROID)
-+#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID)
-   bool copy_successful = true;
- #endif
- 
 diff --git a/gpu/command_buffer/service/shared_image/external_vk_image_gl_representation.cc b/gpu/command_buffer/service/shared_image/external_vk_image_gl_representation.cc
-index 4d17707c2f..df8ea50208 100644
+index 09a9ee597e5d..d147a6db0e93 100644
 --- a/gpu/command_buffer/service/shared_image/external_vk_image_gl_representation.cc
 +++ b/gpu/command_buffer/service/shared_image/external_vk_image_gl_representation.cc
-@@ -7,6 +7,7 @@
- #include <vector>
- 
+@@ -9,6 +9,7 @@
  #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "gpu/command_buffer/service/texture_manager.h"
 +#include "gpu/command_buffer/service/skia_utils.h"
  #include "gpu/vulkan/vulkan_util.h"
  #include "ui/gl/gl_bindings.h"
  
-@@ -146,6 +147,13 @@ void ExternalVkImageGLRepresentationShared::EndAccess() {
+@@ -148,6 +149,13 @@ void ExternalVkImageGLRepresentationShared::EndAccess() {
        backing_impl()->context_state()->MarkContextLost();
        return;
      }
@@ -817,10 +1063,10 @@ index 4d17707c2f..df8ea50208 100644
    backing_impl()->EndAccess(readonly, std::move(external_semaphore),
                              /*is_gl=*/true);
 diff --git a/third_party/openxr/BUILD.gn b/third_party/openxr/BUILD.gn
-index ed731bd432..b7c3568c68 100644
+index aa8e9a109009..b0612f02f8d7 100644
 --- a/third_party/openxr/BUILD.gn
 +++ b/third_party/openxr/BUILD.gn
-@@ -166,6 +166,13 @@ if (enable_openxr) {
+@@ -187,6 +187,13 @@ if (enable_openxr) {
          "XR_USE_PLATFORM_WIN32",
          "XR_USE_GRAPHICS_API_D3D11",
        ]
@@ -835,18 +1081,18 @@ index ed731bd432..b7c3568c68 100644
        defines = [
          "XRLOADER_DISABLE_EXCEPTION_HANDLING",
 diff --git a/ui/gfx/linux/gbm_wrapper.cc b/ui/gfx/linux/gbm_wrapper.cc
-index c1bf39fc53..70b70d0b44 100644
+index 7a1ae26444f3..0f2e4772a3fc 100644
 --- a/ui/gfx/linux/gbm_wrapper.cc
 +++ b/ui/gfx/linux/gbm_wrapper.cc
-@@ -392,8 +392,16 @@ class Device final : public ui::GbmDevice {
-     struct gbm_bo* bo =
-         gbm_bo_import(device_, GBM_BO_IMPORT_FD_MODIFIER, &fd_data, gbm_flags);
+@@ -433,8 +433,16 @@ class Device final : public ui::GbmDevice {
+     struct gbm_bo* bo = gbm_bo_import(device_.get(), GBM_BO_IMPORT_FD_MODIFIER,
+                                       &fd_data, gbm_flags);
      if (!bo) {
 -      LOG(ERROR) << "nullptr returned from gbm_bo_import";
 -      return nullptr;
 +      if (gbm_flags & GBM_BO_USE_SCANOUT) {
 +        gbm_flags &= ~GBM_BO_USE_SCANOUT;
-+        bo = gbm_bo_import(device_, GBM_BO_IMPORT_FD_MODIFIER, &fd_data,
++        bo = gbm_bo_import(device_.get(), GBM_BO_IMPORT_FD_MODIFIER, &fd_data,
 +                           gbm_flags);
 +      }
 +
